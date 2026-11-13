@@ -1,7 +1,7 @@
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
- 
+
 FIELDS = [  # key, label, default
     ("grid_v", "Grid voltage (V)", "400"),
     ("gen_v", "Generator voltage (V)", "400"),
@@ -19,8 +19,8 @@ CHARTS = {  # chart name -> [(key, legend, color)]
 LIM_DV, LIM_DF, LIM_DPH = 5.0, 0.2, 10.0  # sync limits: % , Hz , deg
 OK, BAD, GREY, ESTOP = "#2e9e4f", "#c0392b", "#9aa0a6", "#7b0d0d"
 FONT = "Segoe UI"
- 
- 
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -29,7 +29,7 @@ class App(tk.Tk):
         self.minsize(950, 700)
         self.rows = []  # list of readings (dicts)
         self.estopped = False
- 
+
         # layout: top bar / middle (graph + inputs) / bottom table
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -38,41 +38,41 @@ class App(tk.Tk):
         self._build_table()
         self.refresh()
         self.tick()  # start the real-time clock
- 
+
     # ---------------- top bar: status + clock + E-stop ----------------
     def _build_topbar(self):
         bar = tk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
         bar.columnconfigure(0, weight=1)
- 
+
         self.status = tk.Label(bar, text="", fg="white", font=(FONT, 13, "bold"), pady=12)
         self.status.grid(row=0, column=0, sticky="nsew")
- 
+
         # real-time clock
         self.clock = tk.Label(bar, text="", font=(FONT, 12, "bold"), width=11, padx=8,
                               relief="groove", bd=2)
         self.clock.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
- 
+
         # Label used as a button so colours work on every OS (macOS ignores tk.Button bg)
         self.estop_btn = tk.Label(bar, text="E-STOP", fg="white", bg="#d62828",
                                   font=(FONT, 14, "bold"), width=12, cursor="hand2",
                                   relief="raised", bd=3)
         self.estop_btn.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
         self.estop_btn.bind("<Button-1>", lambda _e: self.toggle_estop())
- 
+
     # ---------------- middle: graph (left) + inputs (right) ----------------
     def _build_middle(self):
         mid = ttk.Frame(self)
         mid.grid(row=1, column=0, sticky="nsew", padx=10, pady=6)
         mid.columnconfigure(0, weight=1)
         mid.rowconfigure(0, weight=1)
- 
+
         # graph panel
         gf = ttk.LabelFrame(mid, text="Graph", padding=8)
         gf.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         gf.columnconfigure(0, weight=1)
         gf.rowconfigure(1, weight=1)
- 
+
         head = ttk.Frame(gf)
         head.grid(row=0, column=0, sticky="ew")
         head.columnconfigure(1, weight=1)
@@ -82,12 +82,12 @@ class App(tk.Tk):
         self.chart_choice.bind("<<ComboboxSelected>>", lambda _e: self.draw_chart())
         self.legend = ttk.Frame(head)  # top-right of the graph
         self.legend.grid(row=0, column=1, sticky="e")
- 
+
         self.canvas = tk.Canvas(gf, bg="white", highlightthickness=1,
                                 highlightbackground="#d0d4da")
         self.canvas.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         self.canvas.bind("<Configure>", lambda _e: self.draw_chart())
- 
+
         # inputs panel
         f = ttk.LabelFrame(mid, text="Inputs", padding=12)
         f.grid(row=0, column=1, sticky="ns")
@@ -101,16 +101,19 @@ class App(tk.Tk):
             self.entries[key] = e
         self.add_btn = ttk.Button(f, text="Add reading", command=self.add_reading)
         self.add_btn.pack(fill="x", pady=(20, 4))
+        self.del_btn = ttk.Button(f, text="Delete selected", command=self.delete_selected)
+        self.del_btn.pack(fill="x", pady=(0, 4))
         self.clear_btn = ttk.Button(f, text="Clear all", command=self.clear)
         self.clear_btn.pack(fill="x")
- 
+
     # ---------------- bottom: history table ----------------
     def _build_table(self):
         tf = ttk.LabelFrame(self, text="History", padding=6)
         tf.grid(row=2, column=0, sticky="ew", padx=10, pady=(6, 10))
         tf.columnconfigure(0, weight=1)
         cols = ["#", "Time"] + [lbl.split(" (")[0] for _, lbl, _ in FIELDS]
-        self.table = ttk.Treeview(tf, columns=cols, show="headings", height=5)
+        self.table = ttk.Treeview(tf, columns=cols, show="headings", height=5,
+                                  selectmode="extended")  # Ctrl/Shift-click for several rows
         for c in cols:
             self.table.heading(c, text=c)
             self.table.column(c, width=50 if c == "#" else 110, anchor="center", stretch=True)
@@ -118,12 +121,13 @@ class App(tk.Tk):
         self.table.config(yscrollcommand=sb.set)
         self.table.grid(row=0, column=0, sticky="ew")
         sb.grid(row=0, column=1, sticky="ns")
- 
+        self.table.bind("<Delete>", lambda _e: self.delete_selected())
+
     # ---------------- clock ----------------
     def tick(self):
         self.clock.config(text=time.strftime("%d %b %Y\n%H:%M:%S"))
         self.after(1000, self.tick)
- 
+
     # ---------------- actions ----------------
     def toggle_estop(self):
         # latch/unlatch: locks inputs and buttons while stopped
@@ -132,13 +136,14 @@ class App(tk.Tk):
         for e in self.entries.values():
             e.config(state=state)
         self.add_btn.config(state=state)
+        self.del_btn.config(state=state)
         self.clear_btn.config(state=state)
         if self.estopped:
             self.estop_btn.config(text="RESET", bg="#f4a300", fg="black")
         else:
             self.estop_btn.config(text="E-STOP", bg="#d62828", fg="white")
         self.refresh()
- 
+
     def add_reading(self):
         if self.estopped:
             return
@@ -151,23 +156,42 @@ class App(tk.Tk):
             return
         row["time"] = time.strftime("%H:%M:%S")
         self.rows.append(row)
-        self.refresh()
- 
-    def clear(self):
+        self.refresh(scroll_to_end=True)  # show the newest reading
+
+    def delete_selected(self):
         if self.estopped:
+            return
+        sel = self.table.selection()
+        if not sel:
+            messagebox.showinfo("Delete", "Select one or more rows in the History table first.")
+            return
+        # delete from the end so earlier indices stay valid
+        for idx in sorted((int(i) for i in sel), reverse=True):
+            del self.rows[idx]
+        self.refresh()  # keeps the current scroll position
+
+    def clear(self):
+        if self.estopped or not self.rows:
+            return
+        if not messagebox.askyesno("Clear all",
+                                   f"Delete all {len(self.rows)} readings?\nThis cannot be undone.",
+                                   icon="warning", default="no"):
             return
         self.rows.clear()
         self.refresh()
- 
+
     # ---------------- refresh ----------------
-    def refresh(self):
-        # table
+    def refresh(self, scroll_to_end=False):
+        # table: rebuild, then either jump to the newest row or keep the old scroll position
+        top = self.table.yview()[0]
         self.table.delete(*self.table.get_children())
         for i, r in enumerate(self.rows, 1):
-            self.table.insert("", "end", values=[i, r["time"]] + [f"{r[k]:g}" for k, _, _ in FIELDS])
-        if self.rows:
-            self.table.yview_moveto(1)
- 
+            # iid = index into self.rows, so selections map straight back to data
+            self.table.insert("", "end", iid=str(i - 1),
+                              values=[i, r["time"]] + [f"{r[k]:g}" for k, _, _ in FIELDS])
+        self.table.update_idletasks()  # let the Treeview recalculate its scroll range
+        self.table.yview_moveto(1 if scroll_to_end else top)
+
         # status banner (E-stop overrides sync check)
         last = self.rows[-1] if self.rows else None
         if self.estopped:
@@ -185,7 +209,7 @@ class App(tk.Tk):
         else:
             self.status.config(text="No readings yet", bg=GREY)
         self.draw_chart()
- 
+
     # ---------------- chart ----------------
     def _draw_legend(self, series):
         for w in self.legend.winfo_children():
@@ -193,7 +217,7 @@ class App(tk.Tk):
         for _, name, color in series:
             tk.Frame(self.legend, bg=color, width=12, height=12).pack(side="left", padx=(10, 4))
             ttk.Label(self.legend, text=name).pack(side="left")
- 
+
     def draw_chart(self):
         c = self.canvas
         c.delete("all")
@@ -208,7 +232,7 @@ class App(tk.Tk):
             c.create_text(w / 2, h / 2, text="Add a reading to see the graph", fill=GREY,
                           font=(FONT, 12))
             return
- 
+
         # y-range with 10% padding
         data = [[row[k] for row in self.rows] for k, _, _ in series]
         lo = min(min(d) for d in data)
@@ -217,13 +241,13 @@ class App(tk.Tk):
             lo, hi = lo - 1, hi + 1
         pad = (hi - lo) * 0.1
         lo, hi = lo - pad, hi + pad
- 
+
         def X(i):
             return l + (i * (w - l - r) / (n - 1) if n > 1 else (w - l - r) / 2)
- 
+
         def Y(v):
             return t + (hi - v) / (hi - lo) * (h - t - b)
- 
+
         # grid + y labels
         for i in range(6):
             v = lo + (hi - lo) * i / 5
@@ -238,7 +262,7 @@ class App(tk.Tk):
         c.create_line(l, t, l, h - b, fill="#888")
         c.create_line(l, h - b, w - r, h - b, fill="#888")
         c.create_text((l + w - r) / 2, h - 8, text="Reading #", font=(FONT, 8), fill="#555")
- 
+
         # lines + points
         for (key, name, color), d in zip(series, data):
             pts = [(X(i), Y(v)) for i, v in enumerate(d)]
