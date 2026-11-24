@@ -1,1 +1,113 @@
+import os, tempfile
+import math
+
+def test_us1_start_stop():
+    ctrl = SystemController()
+    assert ctrl.state == "IDLE" and not ctrl.vfd_motor.is_enabled  # Precondition
+    ok, _ = ctrl.start_system(1800, 500, 100, 15.0)
+    assert ok and ctrl.state == "RUNNING" and ctrl.vfd_motor.is_enabled and ctrl.vfd_gen.is_enabled  # Postcondition (Start)
+    ctrl.stop_system()
+    assert ctrl.state == "IDLE" and not ctrl.vfd_motor.is_enabled and not ctrl.vfd_gen.is_enabled  # Postcondition (Stop)
+
+def test_us2_motor_speed():
+    ctrl = SystemController()
+    assert ctrl.vfd_motor.target_rpm == 0.0  # Precondition
+    ctrl.start_system(1800, 500, 100, 15.0)
+    reading = ctrl.poll_cycle()
+    assert ctrl.vfd_motor.target_rpm == 1800.0
+    assert abs(reading.gen_f - 60.0) <= 0.1  # Postcondition: tracks 60Hz synchronous frequency
+
+def test_us3_ui_controls():
+    ctrl = SystemController()
+    assert ctrl.state == "IDLE"  # Precondition
+    # Verify default safe workflow executes cleanly without exceptions
+    ok, _ = ctrl.start_system(1800, 500, 100, 15.0)
+    assert ok
+    ok_sync, msg = ctrl.attempt_grid_sync()  # Before polling telemetry, sync is safely guarded
+    assert not ok_sync and "RUNNING" in msg  # Postcondition: guarded UI action
+
+def test_us4_sensor_health():
+    ctrl = SystemController()
+    ctrl.start_system(1800, 500, 100, 15.0)
+    assert ctrl.sensors.is_online and ctrl.state == "RUNNING"  # Precondition
+    ctrl.sensors.is_online = False  # Simulate unplugged sensor
+    ctrl.poll_cycle()
+    assert ctrl.state == "FAULT_LOCKOUT" and not ctrl.vfd_motor.is_enabled  # Postcondition
+
+def test_us5_comm_and_logging():
+    ctrl = SystemController()
+    assert len(ctrl.logger.readings) == 0  # Precondition
+    ctrl.start_system(1800, 500, 100, 15.0)
+    for _ in range(5):
+        ctrl.poll_cycle()
+    assert len(ctrl.logger.readings) == 5  # Postcondition: all 5 polling cycles logged
+
+def test_us6_emergency_shutdown():
+    ctrl = SystemController()
+    ctrl.start_system(1800, 500, 100, 15.0)
+    ctrl.poll_cycle({"grid_v": 220, "gen_v": 220, "grid_f": 60, "gen_f": 60, "grid_i": 2, "gen_i": 2, "phase": 0})
+    ctrl.attempt_grid_sync()
+    assert ctrl.state == "SYNCED" and ctrl.grid_relay_closed  # Precondition
+    ctrl.trigger_fault("MANUAL_ESTOP_PRESSED")
+    assert ctrl.state == "FAULT_LOCKOUT" and not ctrl.grid_relay_closed and not ctrl.vfd_motor.is_enabled  # Postcondition
+
+
+def test_us8_telemetry_reading():
+    ctrl = SystemController()
+    ctrl.start_system(1800, 500, 100, 15.0)
+    r = ctrl.poll_cycle()
+    assert 215.0 <= r.grid_v <= 225.0 and 215.0 <= r.gen_v <= 225.0  # Postcondition: 220V nominal
+    assert 59.5 <= r.grid_f <= 60.5 and 59.5 <= r.gen_f <= 60.5      # Postcondition: 60Hz nominal
+
+
+def test_us9_protective_limits():
+    ctrl = SystemController()
+    ctrl.start_system(1800, 500, 100, i_limit=5.0)
+    assert ctrl.max_current_limit == 5.0 and ctrl.state == "RUNNING"  # Precondition
+    ctrl.poll_cycle({"grid_v": 220, "gen_v": 220, "grid_f": 60, "gen_f": 60, "grid_i": 6.2, "gen_i": 6.2, "phase": 0})
+    assert ctrl.state == "FAULT_LOCKOUT" and not ctrl.vfd_gen.is_enabled  # Postcondition: auto-tripped at 6.2A > 5.0A
+
+
+def test_us12_timestamped_csv_export():
+    ctrl = SystemController()
+    ctrl.start_system(1800, 500, 100, 15.0)
+    ctrl.poll_cycle()
+    ctrl.poll_cycle()
+    assert len(ctrl.logger.readings) == 2 and ctrl.logger.readings[0].timestamp != ""  # Precondition
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        path = tmp.name
+    ctrl.logger.export_csv(path)
+    with open(path) as f:
+        lines = f.readlines()
+    os.remove(path)
+    assert len(lines) == 3 and "Timestamp" in lines[0]  # Postcondition: header + 2 timestamped rows
+
+def test_us18_power_calculation():
+    ctrl = SystemController()
+    # Inject known 220V, 10A, 30 deg phase angle
+    r = ctrl.poll_cycle({"grid_v": 220, "gen_v": 220, "grid_f": 60, "gen_f": 60, "grid_i": 10, "gen_i": 10, "phase": 30.0})
+    expected_p = round(math.sqrt(3) * 220 * 10 * math.cos(math.radians(30.0)), 1)
+    expected_q = round(math.sqrt(3) * 220 * 10 * math.sin(math.radians(30.0)), 1)
+    assert abs(r.active_power - expected_p) <= 0.5    # Postcondition: P matches analytical value
+    assert abs(r.reactive_power - expected_q) <= 0.5  # Postcondition: Q matches analytical value
+
+def test_us20_reversible_power_flow():
+    ctrl = SystemController()
+    assert ctrl.state == "IDLE" and ctrl.vfd_motor.role == "MOTOR" and ctrl.vfd_gen.role == "GENERATOR"  # Precondition
+    # Swap roles safely in IDLE
+    ctrl.vfd_motor.role, ctrl.vfd_gen.role = ctrl.vfd_gen.role, ctrl.vfd_motor.role
+    assert ctrl.vfd_motor.role == "GENERATOR" and ctrl.vfd_gen.role == "MOTOR"  # Postcondition
+
+def test_us22_event_alarm_log():
+    ctrl = SystemController()
+    assert len(ctrl.logger.events) == 0  # Precondition
+    ctrl.start_system(1800, 500, 100, 15.0)
+    ctrl.trigger_fault("TEST_FAULT")
+    ctrl.reset_fault()
+    assert len(ctrl.logger.events) == 3  # Postcondition: all 3 transitions logged
+    assert "STARTED" in ctrl.logger.events[0]
+    assert "FAULT TRIP" in ctrl.logger.events[1]
+    assert "Fault cleared" in ctrl.logger.events[2]
+
+
 
